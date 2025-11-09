@@ -1,0 +1,163 @@
+---
+title: "Data Exploration"
+author: "Jules Tucher"
+date: "2025-10-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(haven)
+data_dir <- "/Users/juliatucher/Documents/DACSS/POLISCI 788/Final Project/Gender income/Replication Files Plos/"
+data_raw <- read_dta(file.path(data_dir, "tables.dta")) 
+```
+
+## Data Cleaning
+```{r}
+# summarize wage, current gross income (Euro), wage/salary from main job, gross earnings last month, and months of wages in prev year
+summary(data_raw %>% select(wage, pglabgro, ijob1, plc0013_h, plc0016))
+```
+
+```{r wage-difference-variable-create}
+
+data_with_wage_diffs <- data_raw %>%
+  # male minus female
+  mutate(diff_wage = ifelse(!is.na(wage) & !is.na(wage_female), wage - wage_female, NA_real_)) %>%
+  # female minus male-- NOTE: orginal names have _OR
+  mutate(diff_wage_OR = ifelse(!is.na(wage) & !is.na(wage_female), wage_female - wage, NA_real_),
+         diff_pglabgro_OR = ifelse(!is.na(pglabgro) & !is.na(pglabgro_female), pglabgro_female - pglabgro, NA_real_),
+         diff_ijob1_OR = ifelse(!is.na(ijob1) & !is.na(ijob1_female), ijob1_female - ijob1, NA_real_),
+         diff_plc0013_h_OR = ifelse(!is.na(plc0013_h) & !is.na(plc0013_h_female), plc0013_h_female - plc0013_h, NA_real_)
+         ) %>%
+  # d50 wage variables (woman earns more than man) -- NOTE: original cond don't have _OR version
+  mutate(d50_wage = ifelse(!is.na(diff_wage_OR), diff_wage_OR < 0, NA),
+         d50_pglabgro = ifelse(!is.na(diff_pglabgro_OR), diff_pglabgro_OR < 0, NA),
+         d50_ijob1 = ifelse(!is.na(diff_ijob1_OR), diff_ijob1_OR < 0, NA),
+         d50_plc0013_h = ifelse(!is.na(diff_plc0013_h_OR), diff_plc0013_h_OR < 0, NA)) %>%
+  # wage difference bins
+  mutate(bins_diff_wage = round(diff_wage/1000, 0)) %>%
+  # wage difference if women > man
+  mutate(dint = diff_wage * d50_wage) %>%
+  # mean weighting factor by couple 
+  group_by(pid) %>%
+  mutate(wm = mean(phrf, na.rm=T)) %>%
+  ungroup() %>%
+  # share of household income  that is male
+  mutate(share = wage/(wage_female+wage))
+
+
+summary(data_with_wage_diffs %>% select(diff_wage, diff_ijob1_OR))
+
+summary(data_with_wage_diffs$share)
+```
+
+```{r scale-mental-health}
+
+# new mental health for if MH is higher or lower than median
+data_scale_mcs <- data_with_wage_diffs %>%
+  mutate(med_mcs = cut(mcs, breaks=quantile(mcs, seq(0,1,0.5), na.rm=T, include=T, labels=F),
+                       labels=c(0,1),
+                       right=F,
+                       include.lowest=T))
+```
+
+```{r center-running-var}
+
+# key running variable centered at the cutoff
+data_center_running_var <- data_scale_mcs %>%
+  mutate(recode_diff_wage_OR = diff_wage_OR/1000,
+         recode_diff_wage_OR_int = round(diff_wage_OR/1000, 0),
+         recode_diff_wage = diff_wage/1000,
+         recode_female_wage = wage_female/1000,
+         recode_male_wage_OR=wage/1000
+         )
+
+
+# local variables for later
+running = "recode_diff_wage_OR"
+running_or = "recode_diff_wage_OR_int"
+outcomes = c("overalllifesat", "worksat", "m11125", "std_mcs", "std_pcs")
+outcomes_female = c("overalllifesat_female", "worksat_female", "m11125_female", "std_mcs_female", "std_pcs_female")
+
+```
+
+```{r filter-sample}
+data_male_sample <- data_center_running_var %>%
+  # age constraints for males
+  filter(age > 17, age < 65) %>%
+  # keep partnered males, since female data already added in columns and dataset at partner level
+  filter(partner == 1) %>%
+  filter(female == 0) %>%
+  # filter if missing education of either partner
+  filter(!is.na(edu_isced), !is.na(edu_isced_female)) %>%
+  # filter if missing number of children for either partner
+  filter(!is.na(nchildren), !is.na(nchildren_female))
+```
+
+```{r standardize-outcomes}
+data_std_outcomes <- data_male_sample %>%
+  mutate(across(c('mcs', 'pcs', 'mcs_female', 'pcs_female'), scale, .names='std_{.col}'))
+```
+```{r power-analysis}
+#install.packages("pwrss")
+library(pwrss)
+
+power.t.regression(beta = 0.20,
+                   k.total = 3,
+                   r.squared = 0.30,
+                   power = .80,
+                   alpha = 0.05,
+                   alternative = "two.sided")
+```
+
+```{r clean-variables-ind-fe}
+
+foreach outcome in $outcomes {
+
+areg  `outcome', abs(pid)
+
+predict `outcome'_res, res
+
+
+}
+
+
+global outcomes_res  overalllifesat_res worksat_res m11125_res std_mcs_res std_pcs_res 
+
+
+foreach outcome in $outcomes_female {
+
+areg  `outcome', abs(pid)
+
+predict `outcome'_res, res
+
+
+}
+
+rename overalllifesat_female_res overalllifesat_res_female
+*rename familylifesat_female_res familylifesat_res_female
+*rename houseworksat_female_res houseworksat_res_female
+rename worksat_female_res worksat_res_female
+
+rename m11125_female_res m11125_res_female
+rename std_mcs_female_res std_mcs_res_female
+rename std_pcs_female_res std_pcs_res_female
+
+
+
+global outcomes_res_female  overalllifesat_res_female worksat_res_female m11125_res_female std_mcs_res_female std_pcs_res_female 
+
+global threshold 0.00001
+
+g dummy=(diff_wage_OR>0) if !missing(diff_wage_OR)
+g running_int=recode_diff_wage_OR*west
+global running_int running_int 
+
+```
+## Data Exploration
+
+### Wife-Husband Wage Difference
+
+## Table 1
+
+## Table 2
