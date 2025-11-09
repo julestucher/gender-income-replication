@@ -102,12 +102,29 @@ data_std_outcomes <- data_male_sample %>%
 #install.packages("pwrss")
 library(pwrss)
 
-power.t.regression(beta = 0.20,
-                   k.total = 3,
-                   r.squared = 0.30,
-                   power = .80,
-                   alpha = 0.05,
-                   alternative = "two.sided")
+sds <- data_std_outcomes %>%
+  select(all_of(c(outcomes, "recode_diff_wage_OR", "recode_diff_wage_OR_int", "recode_diff_wage"))) %>%
+  filter(recode_diff_wage_OR < 19, recode_diff_wage_OR > -19) %>%
+  summarize_all(~mean(.x, na.rm=T))
+
+for(var in outcomes) {
+  print(var)
+  sd.out <- sds %>% select(matches(var)) %>% as.numeric()
+  sd.pred <- sds %>% select(recode_diff_wage_OR) %>% as.numeric()
+  beta = ifelse(str_detect(var, "std"), 0.005, 0.05)
+  power.t.regression(beta = beta, # expected coefficient
+                     sd.predictor = sd.pred,
+                     sd.outcome = sd.out, 
+                     k.total = 7, # total number of predictors
+                     r.squared = (beta * sd.pred / sd.out)^2,
+                     power = 0.95, # no default, probability of correctly rejecting the null
+                     alpha = 0.05, # probability of type 1 error
+                     alternative = "two.sided")
+  }
+
+  
+
+
 ```
 
 ```{r clean-variables-ind-fe}
