@@ -21,16 +21,16 @@ cleaned_data_std_outcomes <- readRDS(file.path(root_dir, "Intermediate data file
 # drop if missing treatment or outcome
 analysis_data <- cleaned_data_std_outcomes %>%
   filter(!is.na(treatment), !is.na(overalllifesat))
-  
-# pull random sample to reduce complexity (10%)
-matching_sample <- dplyr::slice_sample(analysis_data, prop=0.1)
 ```
 
 ## Please briefly discuss why you chose these data and what they contain. Also, please identify and discuss the “outcome” and “treatment” variables of interest to you.
 
-I chose these data because it's the same dataset that I am working with for my replication final paper for this class. The data is at the couple level, with covariates for both the husband and the wife in a heterosexual marriage. The treatment variable is a binary indicator variable representing whether the wife out-earns the husband. The outcome variable for this assignment is overall life satisfaction.
+I chose these data because it's the same dataset that I am working with for my replication final paper for this class. The dataset contains ~78,000 observations at the couple-level, where each observation contains data for one male-female heterosexual couple in Germany. The main research question surrounds the effect on overall life satisfaction as a result of a wife outearning her husband. While the full dataset includes covariates for both the husband and the wife, this exercise will focus on the covariates and outcome for the male spouse. The treatment variable is a binary indicator variable representing whether the wife out-earns the husband. The outcome variable for this assignment is overall life satisfaction measured on an ordinal scale.
 
 ```{r}
+# pull random sample to reduce complexity (10% should be sufficient, given power analysis)
+set.seed(5678)
+matching_sample <- dplyr::slice_sample(analysis_data, prop=0.1)
 
 # summarize treatment variable
 matching_sample %>%
@@ -44,16 +44,16 @@ matching_sample %>%
   )
 
 ```
-From the summary, we can see that around 16% of the sample (N = 78,735) is in the treatment group (i.e. where the wife outearns the husband). Since the sample is so imbalanced on the treatment variable, may need to implement many-to-one matching.
+From the summary, we can see that around 15.5% of the sample (N = 7,873) is in the treatment group (i.e. where the wife outearns the husband). 
 
 ## Then, explain which variables are included in your balance and/or X matrices and why. Describe the settings you chose for the various GenMatch arguments (e.g. what estimand have you selected and why?).
 
-Variables included for balance are the covariates we are interested in for the RDD: wage, age, number of children, and whether the husband has a college degree. See the following distributions for those four variables.
+Variables included for balance are the covariates we are interested in for the RDD: wage, age, number of children, and whether the husband has a college degree. I will also include region (East or West Germany) as a matching control, since this is a variable of interest in the analysis. See the following distributions for those five variables.
 
 ```{r matching-vars}
 
-# store names of covariate variables
-covs = c("age", "wage", "nchildren", "college")
+# store names of covariate variables-- male and female
+covs = c("age", "wage", "nchildren", "college", "west", "diff_wage_OR")
 
 # summarize matching variables
 matching_sample %>%
@@ -69,78 +69,70 @@ matching_sample %>%
   
   # reshape for readibility
   pivot_longer(everything()) %>%
-  separate(col = "name", into = c("variable", "stat"), sep = "_") %>%
-  pivot_wider(id_cols = "variable", names_from = "stat")
+  separate(col = "name", into = c("variable", "stat"), sep = "_m") %>%
+  pivot_wider(id_cols = "variable", names_from = "stat", names_prefix = "m")
 
 ```
 
 ```{r genmatch}
-
 # treatment vector
-t = as.vector(matching_sample %>% dplyr::select(treatment))$treatment
+t = as.vector(matching_sample_std$treatment)
 
 # covariate matrix
-X = as.matrix(matching_sample %>% dplyr::select(all_of(covs)))
+X = as.matrix(with(matching_sample_std,
+                   cbind(age, wage, nchildren, college, west, scale(diff_wage_OR))))
 
-# weights vector from data sources
-weights = as.vector(matching_sample %>% dplyr::select(phrf))
+# caliper vector -- only care about region and running variable
+caliper_vec <- c(NA, NA, NA, NA, 0, 0.25)
 
 # run matching algorithm for weights
 genout = GenMatch(Tr = t,
            X = X,
-           estimand = "ATE",
-           M = 1,
-           pop.size = 20,
-           max.generations = 3,
-           wait.generations = 1,
+           estimand = "ATT",
+           M = 2, # we have more C than T
+           pop.size = 200,
+           max.generations = 10,
+           wait.generations = 3,
+           caliper = caliper_vec,
            replace = TRUE,
            ties = TRUE,
-           hard.generation.limit = TRUE,
            print.level = 1)
 
+```
+
+## Present your key balance metrics both numerically and graphically (e.g. Q-Q plots or t-test plots). Was there improvement?
+
+```{r numeric-balance}
 # use match to calculate estimand
 mout <- Match(
   Y = matching_sample$overalllifesat,
   Tr = t,
   X = X,
   Weight.matrix = genout,
-  estimand = "ATE",
+  estimand = "ATT",
   M = 1
 )
 
-mout
-```
-
-
-
-## Present your key balance metrics both numerically and graphically (e.g. Q-Q plots or t-test plots). Was there improvement?
-
-```{r numeric-balance}
 mb <- MatchBalance(
-  treatment ~ age + wage + nchildren + college,
+  treatment ~ age + wage + nchildren + college + west,
   data = matching_sample,
   match.out = mout
 )
-
-mb
-
 ```
 
 ```{r graphical-balance-before}
-par(mfrow = c(2,2))
+par(mfrow = c(2,3))
 
-sample_treated = matching_sample %>%
-  filter(treatment = )
 for (cov in covs) {
   # pull out covariate values from before
-  x_treated <- matching_sample[matching_sample$treatment == 1, cov]
-  x_control <- matching_sample[[cov]][matching_sample$treatment]
+  x_treated <- matching_sample[matching_sample$treatment == 1,][[cov]]
+  x_control <- matching_sample[matching_sample$treatment == 0,][[cov]]
   
   qqplot(x_control,
          x_treated,
          xlab = "Control",
          ylab = "Treated",
-         main = paste("QQ plot for covariate:", cov))
+         main = paste("QQ plot for", cov, "\n(prior to matching)"))
   abline(0, 1, col = "blue", lty = 2)
 }
 par(mfrow = c(1,1))
@@ -148,7 +140,7 @@ par(mfrow = c(1,1))
 ```
 ```{r graphical-balance-after}
 
-par(mfrow = c(2,2))
+par(mfrow = c(2,3))
 for (cov in covs) {
   x_treated <- matching_sample[[cov]][mout$index.treated]
   x_control <- matching_sample[[cov]][mout$index.control]
@@ -157,11 +149,29 @@ for (cov in covs) {
          x_treated,
          xlab = "Control",
          ylab = "Treated",
-         main = paste("QQ plot for covariate:", cov))
+         main = paste("QQ plot", cov, "(post matching)"))
   abline(0, 1, col = "blue", lty = 2)
 }
 par(mfrow = c(1,1))
 ```
 
 ## Did you find a treatment effect? Was this finding different from what you find without matching?
+```{r matching-ATT}
+summary(mout)
+```
+
+```{r estimate-with-regression}
+model.1 <- lm(
+  overalllifesat ~
+    treatment +
+    age +
+    wage +
+    nchildren +
+    college + 
+    west
+  ,
+  data = matching_sample
+)
+summary(model.1)
+```
 
