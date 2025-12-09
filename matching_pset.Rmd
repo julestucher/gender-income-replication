@@ -21,11 +21,12 @@ cleaned_data_std_outcomes <- readRDS(file.path(root_dir, "Intermediate data file
 # drop if missing treatment or outcome
 analysis_data <- cleaned_data_std_outcomes %>%
   filter(!is.na(treatment), !is.na(overalllifesat))
+  
 ```
 
 ## Please briefly discuss why you chose these data and what they contain. Also, please identify and discuss the “outcome” and “treatment” variables of interest to you.
 
-I chose these data because it's the same dataset that I am working with for my replication final paper for this class. The dataset contains ~78,000 observations at the couple-level, where each observation contains data for one male-female heterosexual couple in Germany. The main research question surrounds the effect on overall life satisfaction as a result of a wife outearning her husband. While the full dataset includes covariates for both the husband and the wife, this exercise will focus on the covariates and outcome for the male spouse. The treatment variable is a binary indicator variable representing whether the wife out-earns the husband. The outcome variable for this assignment is overall life satisfaction measured on an ordinal scale.
+I chose these data because it's the same dataset that I am working with for my replication final paper for this class. The dataset contains ~78,000 observations at the couple-level, where each observation contains data for one male-female heterosexual couple in Germany. The main research question surrounds the effect on overall life satisfaction as a result of a wife outearning her husband. While the full dataset includes covariates for both the husband and the wife, this exercise will focus on the covariates and outcome for the male spouse. Additionally, due to limited computational resources, I pull a random sample of 10% of the full sample for this exercise. Given power analysis in the pre-analysis plan, a sample size of around 7,800 should be sufficient to estimate treatment effect. The treatment variable is a binary indicator variable representing whether the wife out-earns the husband. The outcome variable for this assignment is overall life satisfaction measured on an ordinal scale.
 
 ```{r}
 # pull random sample to reduce complexity (10% should be sufficient, given power analysis)
@@ -48,12 +49,12 @@ From the summary, we can see that around 15.5% of the sample (N = 7,873) is in t
 
 ## Then, explain which variables are included in your balance and/or X matrices and why. Describe the settings you chose for the various GenMatch arguments (e.g. what estimand have you selected and why?).
 
-Variables included for balance are the covariates we are interested in for the RDD: wage, age, number of children, and whether the husband has a college degree. I will also include region (East or West Germany) as a matching control, since this is a variable of interest in the analysis. See the following distributions for those five variables.
+Variables included for balance are the covariates we are interested in for the RDD: wage, age, number of children, and whether the husband has a college degree. I will also include region (East or West Germany) as a matching control, since this is a variable of interest in the analysis. Finally, since we are mimicking a regression disconinuity design (RD), include a scaled version of the running variable as a matching control. This will preserve the RD constraint of only including observations close to the threshold. See the following distributions for those five variables.
 
 ```{r matching-vars}
 
 # store names of covariate variables-- male and female
-covs = c("age", "wage", "nchildren", "college", "west", "diff_wage_OR")
+covs = c("age", "wage", "nchildren", "college", "west")
 
 # summarize matching variables
 matching_sample %>%
@@ -73,13 +74,13 @@ matching_sample %>%
   pivot_wider(id_cols = "variable", names_from = "stat", names_prefix = "m")
 
 ```
-
+Set parameters for `GenMatch` method according to design characteristics. The treatment vector is pulled directly from the data. The covariates matrix (equal, in this case, to the balance matrix), includes the relevant covariates. Declare and include a vector of caliper measures, which will constrict matching distinces on included variables. I set caliper distances only for the region covariate and the standardized running variable. Caliper for region (value is 0) is included to prevent East-West matches. Caliper for standardized running variable (value is 0.25 SD) to maintain RD design and match close to the threshold. Use `M = 1` for 1:1 matching. Since we are interested in the impact of the wife out earning her husband among actual treated couples, set the estimand to ATT. Population size, max generations, and wait generations are set to optimize runtime while also having meaningful results. Use replacement and allow for ties, since we have a relatively small proportion of the sample in the treatment group. 
 ```{r genmatch}
 # treatment vector
-t = as.vector(matching_sample_std$treatment)
+t = as.vector(matching_sample$treatment)
 
 # covariate matrix
-X = as.matrix(with(matching_sample_std,
+X = as.matrix(with(matching_sample,
                    cbind(age, wage, nchildren, college, west, scale(diff_wage_OR))))
 
 # caliper vector -- only care about region and running variable
@@ -89,9 +90,9 @@ caliper_vec <- c(NA, NA, NA, NA, 0, 0.25)
 genout = GenMatch(Tr = t,
            X = X,
            estimand = "ATT",
-           M = 2, # we have more C than T
+           M = 1, 
            pop.size = 200,
-           max.generations = 10,
+           max.generations = 15,
            wait.generations = 3,
            caliper = caliper_vec,
            replace = TRUE,
@@ -101,6 +102,8 @@ genout = GenMatch(Tr = t,
 ```
 
 ## Present your key balance metrics both numerically and graphically (e.g. Q-Q plots or t-test plots). Was there improvement?
+
+Use the `MatchBalance` function from the `Matching` package to numerically present metrics. 
 
 ```{r numeric-balance}
 # use match to calculate estimand
@@ -114,12 +117,15 @@ mout <- Match(
 )
 
 mb <- MatchBalance(
-  treatment ~ age + wage + nchildren + college + west,
+  treatment ~ age + wage + nchildren + college + west + diff_wage_OR,
   data = matching_sample,
   match.out = mout
 )
 ```
+From this numerical presentation of unmatched and matched samples, we can see that the standard mean difference between treatment and control groups is lower after matching for all balance covariates.
 
+
+Also produce QQ-plots for each covariate before and after matching. 
 ```{r graphical-balance-before}
 par(mfrow = c(2,3))
 
@@ -154,16 +160,36 @@ for (cov in covs) {
 }
 par(mfrow = c(1,1))
 ```
+Comparing QQ plots of covariates before and after matching tells a similar story. All covariates show visible improvement in balance.
 
 ## Did you find a treatment effect? Was this finding different from what you find without matching?
+
+Summarizing the matching output provides the estimate of the relevant estimand, ATT:
+
 ```{r matching-ATT}
 summary(mout)
 ```
 
+While the estimate for ATT is negative and of expected magnitude, it is not statistically significant, so cannot conclude any treatment effect of wife outearning husband on husband's overall life satisfaction.
+
+Without matching, we can compare outcomes of the treatment and control group using a two-sided t-test.
+```{r t-test}
+t.test(matching_sample[matching_sample$treatment==1,][["overalllifesat"]],
+       matching_sample[matching_sample$treatment==0,][["overalllifesat"]])
+```
+Results from the t-test, using data prior to matching, demonstrate a statistically significant negative treatment effect on the treated. 
+
+For additional comparison, estimate the ATT (local average treatment effect) using OLS regression with an analogous linear regression model as specified in the pre-analysis plan. 
 ```{r estimate-with-regression}
 model.1 <- lm(
   overalllifesat ~
     treatment +
+    # running variable
+    diff_wage_OR + 
+    # treatment-rv interaction
+    treatment * diff_wage_OR +
+  
+    # covariate controls
     age +
     wage +
     nchildren +
@@ -174,4 +200,6 @@ model.1 <- lm(
 )
 summary(model.1)
 ```
+From the OLS model summary, I do find a treatment effect, where wife outearning husband has a negative effect on overall life satisfaction.
 
+Matching may have reduced statistical power because the total number of couples in the matched sample is significantly smaller (N = 2,442) than the unmatched sample (N = 7,873). With additional computational resources, using a larger proportion of the intial sample would include a higher number of treated couples, leading to a larger matched sample and more statistical power.
