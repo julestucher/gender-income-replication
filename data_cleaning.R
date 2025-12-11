@@ -1,8 +1,9 @@
 library(tidyverse)
 library(haven)
+library(fixest)
 
 # filepaths
-root_dir <- "/Users/juliatucher/Documents/DACSS/POLISCI 788/Final Project/Gender income/"
+root_dir <- getwd()
 data_raw <- read_dta(file.path(root_dir, "Replication Files Plos", "tables.dta")) 
 
 # convert categorical variables with value labels to dummy variables
@@ -10,7 +11,7 @@ data_with_dummies <- data_raw %>%
   # remove value label for numerics
   mutate(
     across(
-      starts_with(c("partner", "pglabgro", "plc0013_h", "plc0016", "ijob1")),
+      starts_with(c("partner", "pglabgro", "plc0013_h", "plc0016", "ijob1", "overalllifesat", "worksat", "m11125")),
       zap_labels
     )
   ) %>%
@@ -22,7 +23,9 @@ data_with_dummies <- data_raw %>%
     )
   ) %>%
   # create dummy variables
-  mutate(college = (edu_isced == "College or More") * 1)
+  mutate(college = (edu_isced == "College or More") * 1,
+         college_female = (edu_isced_female == "College or More") * 1
+         )
 
 # create raw wage difference variables
 data_with_wage_diffs <- data_with_dummies %>%
@@ -72,10 +75,9 @@ data_center_running_var <- data_scale_mcs %>%
 # local variables for later
 running = "recode_diff_wage_OR"
 running_or = "recode_diff_wage_OR_int"
-outcomes = c("overalllifesat", "worksat", "m11125", "std_mcs", "std_pcs")
-outcomes_female = c("overalllifesat_female", "worksat_female", "m11125_female", "std_mcs_female", "std_pcs_female")
+outcomes = c("overalllifesat", "worksat", "m11125", "std_mcs", "std_pcs", "overalllifesat_female", "worksat_female", "m11125_female", "std_mcs_female", "std_pcs_female")
 
-
+# filter according to missing covariates and age limitations
 data_male_sample <- data_center_running_var %>%
   # age constraints for males
   filter(age > 17, age < 65) %>%
@@ -85,12 +87,31 @@ data_male_sample <- data_center_running_var %>%
   # filter if missing education of either partner
   filter(!is.na(edu_isced), !is.na(edu_isced_female)) %>%
   # filter if missing number of children for either partner
-  filter(!is.na(nchildren), !is.na(nchildren_female))
+  filter(!is.na(nchildren), !is.na(nchildren_female)) %>%
+  # filter if missing running variable
+  filter(!is.na(recode_diff_wage_OR))
 
-# final standardized dataset
+# standardized health outcomes for male and female
 data_std_outcomes <- data_male_sample %>%
   mutate(across(c('mcs', 'pcs', 'mcs_female', 'pcs_female'), scale, .names='std_{.col}'))
 
+## calculate residuals for partners to reduce eliminate time variance
+
+# fitting regression on participant ID
+for (outcome in outcomes) {
+  # regress outcome ~ 1 | pid (intercept + individual FE)
+  fe_model <- feols(as.formula(paste(outcome, "~ 1 | pid")), data = data_std_outcomes)
+  
+  # get the exact sample
+  model_data <- fixest_data(fe_model, sample = "estimation")
+  model_rows <- rownames(model_data)
+  
+  # create residual variable for each outcome
+  data_std_outcomes[[paste0(outcome, "_res")]] <- NA
+  data_std_outcomes[model_rows, paste0(outcome, "_res")] <- resid(fe_model)
+  
+}
+
 # save RDS
-saveRDS(data_std_outcomes, file.path(root_dir, "Intermediate data files", "cleaned_data_std_outcomes.RDS"))
+saveRDS(data_std_outcomes, file.path(root_dir, "Intermediate data files", "analysis_data.RDS"))
 
