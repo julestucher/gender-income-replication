@@ -6,37 +6,12 @@ library(fixest)
 root_dir <- getwd()
 data_raw <- read_dta(file.path(root_dir, "Replication Files Plos", "tables.dta")) 
 
-# convert categorical variables with value labels to dummy variables
-data_with_dummies <- data_raw %>%
-  # remove value label for numerics
-  mutate(
-    across(
-      starts_with(c("partner", "pglabgro", "plc0013_h", "plc0016", "ijob1", "overalllifesat", "worksat", "m11125")),
-      zap_labels
-    )
-  ) %>%
-  # convert value labels to factors
-  mutate(
-    across(
-      where(haven::is.labelled),
-      haven::as_factor
-    )
-  ) %>%
-  # create dummy variables
-  mutate(college = (edu_isced == "College or More") * 1,
-         college_female = (edu_isced_female == "College or More") * 1
-         )
-
 # create raw wage difference variables
 data_with_wage_diffs <- data_with_dummies %>%
   # male minus female
   mutate(diff_wage = ifelse(!is.na(wage) & !is.na(wage_female), wage - wage_female, NA_real_)) %>%
   # female minus male-- NOTE: orginal names have _OR
-  mutate(diff_wage_OR = ifelse(!is.na(wage) & !is.na(wage_female), wage_female - wage, NA_real_),
-         diff_pglabgro_OR = ifelse(!is.na(pglabgro) & !is.na(pglabgro_female), pglabgro_female - pglabgro, NA_real_),
-         diff_ijob1_OR = ifelse(!is.na(ijob1) & !is.na(ijob1_female), ijob1_female - ijob1, NA_real_),
-         diff_plc0013_h_OR = ifelse(!is.na(plc0013_h) & !is.na(plc0013_h_female), plc0013_h_female - plc0013_h, NA_real_)
-  ) %>%
+  mutate(diff_wage_OR = ifelse(!is.na(wage) & !is.na(wage_female), wage_female - wage, NA_real_)) %>%
   # d50 wage variables (woman earns more than man) -- NOTE: original cond don't have _OR version
   mutate(d50_wage = ifelse(!is.na(diff_wage_OR), diff_wage_OR < 0, NA),
          d50_pglabgro = ifelse(!is.na(diff_pglabgro_OR), diff_pglabgro_OR < 0, NA),
@@ -52,13 +27,6 @@ data_with_wage_diffs <- data_with_dummies %>%
   ungroup() %>%
   # share of household income  that is male
   mutate(share = wage/(wage_female+wage))
-
-# new mental health for if MH is higher or lower than median
-data_scale_mcs <- data_with_wage_diffs %>%
-  mutate(med_mcs = cut(mcs, breaks=quantile(mcs, seq(0,1,0.5), na.rm=T, include=T, labels=F),
-                       labels=c(0,1),
-                       right=F,
-                       include.lowest=T))
 
 # key running variable centered at the cutoff
 data_center_running_var <- data_scale_mcs %>%
@@ -95,23 +63,7 @@ data_male_sample <- data_center_running_var %>%
 data_std_outcomes <- data_male_sample %>%
   mutate(across(c('mcs', 'pcs', 'mcs_female', 'pcs_female'), scale, .names='std_{.col}'))
 
-## calculate residuals for partners to reduce eliminate time variance
 
-# fitting regression on participant ID
-for (outcome in outcomes) {
-  # regress outcome ~ 1 | pid (intercept + individual FE)
-  fe_model <- feols(as.formula(paste(outcome, "~ 1 | pid")), data = data_std_outcomes)
-  
-  # get the exact sample
-  model_data <- fixest_data(fe_model, sample = "estimation")
-  model_rows <- rownames(model_data)
-  
-  # create residual variable for each outcome
-  data_std_outcomes[[paste0(outcome, "_res")]] <- NA
-  data_std_outcomes[model_rows, paste0(outcome, "_res")] <- resid(fe_model)
-  
-}
 
-# save RDS
-saveRDS(data_std_outcomes, file.path(root_dir, "Intermediate data files", "analysis_data.RDS"))
+
 

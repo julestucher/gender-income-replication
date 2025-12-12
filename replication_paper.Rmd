@@ -1,0 +1,411 @@
+---
+title: "Replication: Relative income within the household, gender norms, and well-being"
+author: "Jules Tucher"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+---
+
+```{r setup}
+library(tidyverse)
+library(haven)
+library(rdrobust)
+library(fixest)
+library(knitr)
+library(kableExtra)
+library(pwrss)
+library(rdhte)
+
+# set local directory and open analysis datafile
+root_dir <- getwd()
+data_raw <- read_dta(file.path(root_dir, "Replication Files Plos", "tables.dta")) 
+```
+
+# Introduction and Background
+
+The article for this replication, “Relative income within the household, gender norms, and well-being,” is a 2024 study that uses regression discontinuity design (RDD) on longitudinal observation data to examine the effects of women out-earning their husbands on overall life satisfaction and health outcomes (Gihleb, et al. 2024). It explores the differences in results between East and West Germany, where social norms about women's participation in the workforce differs. The replication package includes a Stata dataset and two Stata program files to replicate the main findings in the paper. The raw data is not included, but instead a clean analysis file that includes the constructs from the analysis.
+For my final project, I suggest replicating the main figures from the paper, as well as performing the two RD analyses. My replication paper would also add a discussion about the causal claim made by the original article, specifically the assumptions and limitations of the methods employed, as the original article does not discuss causal inference in depth. As I continue to work on the project, I may also explore additional analyses to perform.
+
+## Research Hypothesis
+
+Although the research team does not explicitly state their hypotheses in the published article, I would state the null hypothesis as relative income has no effect on the satisfaction and mental and physical health of men and women in Germany. The confirmatory hypothesis of the study is that women earning more than their husbands causes people to be less satisfied with their lives, with a theoretical framing based on cultural and gender norms that expect men to be the breadwinners. Exploratory hypotheses investigate the moderating effect of region on this causal relationship, based on an understanding of the differing cultural and gender norms in East and West Germany. Because it became more normalized for women to enter the work force during the Cold War in East Germany, cultural values shifted toward more equal work expectations of men and women. 
+
+# Methods
+
+## Discription of the Data
+The replication dataset provided by the research team is at the couple-level, with values for the male and female members of the heterosexual couple. The unit of analysis is the couple. The population is married adults in Germany. This observational data was collected from the German Socioeconomic Panel (GSOEP), a longitudinal socioeconomic survey. The methods employ a regression discontinuity design, comparing outcomes between couples where women just outearn their husbands. Therefore, the explanatory variable is the difference in income between the two members of the couple. The outcomes of interest include satisfaction with life, health, and work, as well as physical and mental health ratings. Finally, the research team was interested in regional differences between East and West Germany, specifically as associated with different cultural and gender norms in the two regions.
+
+## Quantitative Measures
+Unfortunately, the replication dataset provided includes pre-calculated constructs and not the raw variables, so I cannot replicate variable construction and dataset aggregation. Furthermore, the raw data, although publicly available, requires an application process to obtain. However, the authors do describe their operationalization strategies. 
+
+The data provided by the research team is a Stata dataset. Once loaded into R, remove labels from labeled numeric variables before converting all variables with value labels to factors. Then, construct a dummy variable for college education. Finally, filter the dataset by the constraints described in the original paper: husband between 18 and 65, couple-level (remove female rows), and no missing covariates. Other covariates include region (East/West), number of children, age, and education. These variables were measured in the first year of marriage.
+
+```{r cleaning-data}
+# convert categorical variables with value labels to dummy variables
+data_sample <- data_raw %>%
+  # remove value label for numerics
+  mutate(
+    across(
+      starts_with(c("partner", "pglabgro", "plc0013_h", "plc0016", "ijob1", "overalllifesat", "worksat", "m11125")),
+      zap_labels
+    )
+  ) %>%
+  # convert value labels to factors
+  mutate(
+    across(
+      where(haven::is.labelled),
+      haven::as_factor
+    )
+  ) %>%
+  # create dummy variables
+  mutate(college = (edu_isced == "College or More") * 1,
+         college_female = (edu_isced_female == "College or More") * 1
+         ) %>%
+  # filter according to missing covariates and age limitations
+  # age constraints for males
+  filter(age > 17, age < 65) %>%
+  # keep partnered males, since female data already added in columns and dataset at partner level
+  filter(partner == 1) %>%
+  filter(female == 0) %>%
+  # filter if missing education of either partner
+  filter(!is.na(college), !is.na(college_female)) %>%
+  # filter if missing number of children for either partner
+  filter(!is.na(nchildren), !is.na(nchildren_female)) 
+
+```
+Wage variables for both members of the couple are provided in the data set. To construct the running variable, subtract the husband wage varaible from the wife's wage. Also create a recoded version that is scaled to $1,000s of dollars and an integer version that will be used for error clustering. Finally, create a treatment indicator for if the running variable is above or below 0. Filter out any observations with missing running variable.
+```{r running-variable, echo=FALSE}
+# create constructs
+data_rv <- data_sample %>%
+  mutate(
+    ## Running variable / treatment
+    # female-male wage difference (running variable)
+    diff_wage_OR = ifelse(!is.na(wage) & !is.na(wage_female), wage_female - wage, NA_real_),
+    # scaled
+    recode_diff_wage_OR = diff_wage_OR/1000,
+    # integer (for error clustering)
+    recode_diff_wage_OR_int = round(diff_wage_OR/1000, 0),
+    # treatment variable based on RV
+    treatment = (diff_wage_OR>0) * 1,
+  ) %>%
+  # filter if missing running variable
+  filter(!is.na(recode_diff_wage_OR))
+```
+
+Next, consider the five outcome variables. The three satisfaction variables (life, work, and health) are constructed based on survey questions on an 11-point Likert scale. No other construction details are provided, but exploration of the provided data reveals that variables are averages on that same scale. The other two outcome variables in the main analysis, mental and physical health, are pulled from the 12-Item Short Form Health Survey, a subsurvey of the GSOEP administered every 2 years. The 12 questions are asked on the 0 to 100 scale, and converted to averages and standardized for this analysis. The final consideration in the contruction of the analysis dataset is to account for fixed-effects of time-varying outcomes. Since the data set contains multiple records per couple (across survey years). To account for the fixed effects of these time-varying outcomes, regress each outcome to a constant with couple-level fixed-effects. Then, extract residuals from the model and replace the outcome with the residual. 
+```{r std-fe-outcomes, echo=FALSE}
+# declare outcome variables and running var
+running_var = "recode_diff_wage_OR"
+outcomes = c("overalllifesat", "worksat", "m11125", "std_mcs", "std_pcs", "overalllifesat_female", "worksat_female", "m11125_female", "std_mcs_female", "std_pcs_female")
+
+# index the data so we can lookup later
+data_indexed <- data_rv %>%
+  # standardize health and mental-health outcomes
+  mutate(
+    across(
+      c('mcs', 'pcs', 'mcs_female', 'pcs_female'),
+      scale,
+      .names='std_{.col}')
+    ) %>%
+  rowid_to_column()
+
+## recalculate outcomes to account for individual fixed effects
+for (outcome in outcomes) {
+  # fitting regression on participant ID
+  fe_model <- feols(as.formula(paste(outcome, "~ 1 | pid")), data = data_indexed)
+  
+  # get the rows used in the exact sample
+  model_rows <- fixest_data(fe_model, sample = "estimation")$rowid
+
+  # create residual variable for each outcome, storing NA when not in the model
+  data_indexed[[paste0(outcome, "_res")]] <- NA
+  data_indexed[model_rows, paste0(outcome, "_res")] <- resid(fe_model)
+  
+  # confirm rows not included in model are those with NA resid
+  stopifnot(data_indexed[is.na(data_indexed[[paste0(outcome, "_res")]]), "rowid"] == data_indexed[!(data_indexed$rowid %in% model_rows), "rowid"])
+}
+
+# save RDS
+saveRDS(data_indexed, file.path(root_dir, "Intermediate data files", "analysis_data.RDS"))
+```
+
+## Estimation Procedure
+This study implements an RDD analysis to estimate the local average treatment effect (LATE) using OLS linear regression. The model is specified as:
+$$Y_{iht}=\beta_1I[E_{iht}^{Wife}\ge E_{iht}^{Husband}] + \beta_2(E_{iht}^{Wife}-E_{iht}^{Husband})+\beta_3(E_{iht}^{Wife}-E_{iht}^{Husband})*I[E_{iht}^{Wife}\ge E_{iht}^{Husband}]+\epsilon_{iht}+\eta_i$$
+Here, `Y` is the metric of well-being or health, $E_{iht}^{Wife}-E_{iht}^{Husband}$ is the running variable constructed for the treatment, $\beta_1$ is the coefficient of interest, $\eta_i$ represents the fixed effects at the individual level, and $\epsilon_{iht}$ is the couple-level error term. Controls are omitted from this equation but present in the OLS model.
+
+# Results
+
+## Running Variable: Wife-Husband Wage Difference
+
+```{r histogram-threshold}
+analysis_data <- readRDS(file.path(root_dir, "Intermediate data files", "analysis_data.RDS"))
+
+# restrict to within 20k of threshold
+threshold_data <- analysis_data %>%
+  filter(abs(recode_diff_wage_OR) < 20)
+
+threshold_data %>%
+  ggplot(aes(x=recode_diff_wage_OR)) +
+    geom_histogram(aes(y = ..density..), boundary = 0, binwidth=2, color="#e9ecef", fill="#69b3a2", alpha=0.9) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size=15)
+    ) +
+    geom_vline(aes(xintercept = 0), color = "black", linetype = "dashed", linewidth = 1) +
+    labs(
+      x = "Wife-Husband Wage Difference",
+      y = "",
+      title = paste0("Running variable density within 20k of threshold (N = ", format(nrow(threshold_data), big.mark=","), ")"),
+      fill = ""
+    )
+
+```
+The above histogram depicts the distribution of the running variable for those observation whose running variable is within $20,000 of the threshold to model the running variable near the cutoff.
+
+## Implementing the model in R
+```{r rd-model, echo=FALSE}
+# store covariate data (consistent across outcomes)
+male_covs = c("age", "wage", "nchildren", "college")
+
+# store female covs
+female_covs = c("age", "wage_female", "nchildren_female", "college_female")
+           
+# set threshold to 0 and pull out running variable
+threshold <- 0.00001
+
+results <- list()
+plots <- list()
+for (outcome in outcomes) {
+  
+  # set covariate names dependending on male/female
+  covs <- if (grepl("female", outcome)) female_covs else male_covs
+  
+  # rdrobust: outcome ~ running | cutoff, clustered SE
+  rd <- rdrobust(y = analysis_data[[paste0(outcome, "_res")]],
+                 x = analysis_data[[running_var]], 
+                 c = threshold,
+                 covs = analysis_data[, covs, drop=FALSE], # controls
+                 bwselect = "mserd", # use MSE selection criteria
+                 cluster = analysis_data$recode_diff_wage_OR_int # integer version of RV
+                 )
+  
+  # get sample used in RD so we can report stats (non-missing outcome and within benchmark)
+  rd_sample <- !is.na(analysis_data[[paste0(outcome, "_res")]]) & # outcome not missing
+                ifelse(analysis_data[[running_var]] <= threshold, # check if treated
+                      abs(analysis_data[[running_var]] - threshold) <= rd$bws["h","left"], # if not treated, use left threshold
+                      abs(analysis_data[[running_var]] - threshold) <= rd$bws["h","right"]) # if treated, use right bandwidth
+  rd_effective_data <- analysis_data[rd_sample,]
+  
+  # store results for later table
+  results[[outcome]] <- list(
+    rd_effect = rd$coef[3], # pull robust effect estimate, error, and pval
+    rd_error = rd$se[3],
+    rd_pval = rd$pv[3],
+    n_effective = nrow(rd_effective_data),
+    y_mean =  mean(rd_effective_data[[outcome]]),
+    y_sd = sd(rd_effective_data[[outcome]])
+  )
+  
+  # create RD plots (for lifesat and health)
+  if (grepl("overalllifesat", outcome) | grepl("m11125", outcome)) {
+    
+    plots[[outcome]] <- rdplot(
+          y = rd_effective_data[[paste0(outcome, "_res")]],
+          x = rd_effective_data$recode_diff_wage_OR,
+          c = threshold,
+          covs = rd_effective_data[, covs, drop=FALSE],
+          binselect = "es",
+          h = rd$bws["h",],
+          p = 1,
+          ci = 95
+        )$rdplot 
+  }
+}
+```
+
+## Replicating Figure 2: Gender norms, well-being and health, men.
+```{r fig-2}
+plots[["overalllifesat"]] +
+  ggtitle("Satisfaction with life") +
+  xlab("Running variable near threshold ($1,000)") +
+  ylab("Outcome with individual FE")
+plots[["m11125"]] +
+  ggtitle("Satisfaction with health") +
+  xlab("Running variable near threshold ($1,000)") +
+  ylab("Outcome with individual FE")
+```
+
+## Replicating Figure 3: Gender norms, well-being and health, women.
+```{r fig-3}
+plots[["overalllifesat_female"]] +
+  ggtitle("Satisfaction with life") +
+  xlab("Running variable near threshold ($1,000)") +
+  ylab("Outcome with individual FE")
+plots[["m11125_female"]] +
+  ggtitle("Satisfaction with health") +
+  xlab("Running variable near threshold ($1,000)") +
+  ylab("Outcome with individual FE") +
+  scale_y_continuous(breaks = c(-0.1, -0.05, 0, 0.05, 0.1),limits = c(-0.1, 0.1))
+```
+
+## Replicating Table 1
+
+```{r table-1}
+# convert results to a table that we like
+results %>%
+  # combine results for all models
+  lapply(as.data.frame) %>%
+  bind_rows() %>%
+  mutate(outcome = outcomes) %>%
+  
+  # add gender column, p-value sig stars, and combine values for final RD expression
+  separate(outcome, into = c("outcome", "gender"), fill = "right", sep = "_female") %>%
+  mutate(pstar = ifelse(rd_pval < 0.01, "***",
+                        ifelse(rd_pval < 0.05, "**",
+                               ifelse(rd_pval < 0.1, "*", "")))) %>%
+  mutate(gender = ifelse(is.na(gender), "male", "female"),
+         rd_effect = paste0(round(rd_effect, 3), pstar),
+         rd_error = paste0("(", round(rd_error, 3), ")"),
+         n_effective = paste(format(n_effective, big.mark=","))
+         ) %>%
+  
+  # format estimates
+  mutate(
+    across(
+      all_of(c("y_mean", "y_sd")),
+      ~paste(round(.x, 3))
+    )
+  ) %>%
+  
+  # reshape so columns are each model
+  select(-all_of(c("rd_pval", "pstar"))) %>%
+  pivot_longer(cols = -c("outcome", "gender")) %>%
+  pivot_wider(id_cols = c("gender", "name"), names_from = "outcome") %>%
+  
+  # order rows and label
+  mutate(name = factor(name, levels = c("rd_effect", "rd_error", "n_effective", "y_mean", "y_sd")),
+         gender = factor(gender, levels = c("male", "female"))) %>%
+  arrange(gender, name) %>%
+  mutate(name = rep(c("RDD wife earns more", "", "Observations (effective)", "Mean of dep. var.", "SD of dep. var."), 2)) %>%
+  select(-gender) %>%
+  
+  # final kable
+  kable(
+    col.names = c("", "Satisfaction with life", "Satisfaction with work",
+                  "Satisfaction with health", "Mental health", "Physical health"),
+    align = c("l", rep('c', 5)),
+    escape = FALSE
+  ) %>%
+  kableExtra::add_header_above(
+    header = c(" " = 1, "Dependent variable" = 5)
+  ) %>%
+  kableExtra::group_rows("Panel A: Male", 1, 5) %>%
+  kableExtra::group_rows("Panel B: Female", 6, 10) 
+
+```
+No age variable for wife included in the replication data set.
+
+## Replicating Table 2
+
+```{r rd-model-west, echo=FALSE}
+# create analysis dataset for region-specific model
+analysis_data_west <- analysis_data %>%
+  mutate(
+    # region * treatment
+    west_treatment = west * treatment
+  )
+
+results_west <- list()
+for (outcome in outcomes) {
+  
+  # set gender-dependent covariates
+  covs <- if (grepl("female", outcome)) female_covs else male_covs
+  
+  # rdhte: estimation for heterogeneous treatment effects in RD designs
+  rd_hte <- rdhte(y = analysis_data_west[[paste0(outcome, "_res")]],
+              x = analysis_data_west[[running_var]], 
+              c = threshold,
+              covs.hte = factor(analysis_data_west$west),
+              covs.eff = as.matrix(analysis_data_west[, covs, drop=FALSE]),
+              bwselect = "mserd", # use MSE selection criteria
+              cluster = analysis_data_west$recode_diff_wage_OR_int # integer version of RV
+              )
+  
+  # get sample used in RD so we can report stats (non-missing outcome and within benchmark)
+  rd_sample <- !is.na(analysis_data_west[[paste0(outcome, "_res")]]) &
+                ifelse(analysis_data_west[[running_var]] <= threshold, 
+                      abs(analysis_data_west[[running_var]] - threshold) <= rd_hte$h[1,1], # left bandwidth
+                      abs(analysis_data_west[[running_var]] - threshold) <= rd_hte$h[1,2]) # right bandwidth
+  rd_effective_data <- analysis_data_west[rd_sample,]
+  
+  # store results for later table
+  results_west[[outcome]] <- list(
+    rd_effect = rd_hte$coef[2], # pull effect for west = 1
+    rd_error = rd_hte$se[2], # pull se for west
+    rd_pval = rd_hte$pv[2], # pull p-value for west
+    n_effective = sum(rd_sample),
+    y_mean =  mean(analysis_data_west[[outcome]][rd_sample]),
+    y_sd = sd(analysis_data_west[[outcome]][rd_sample])
+  )
+}
+
+```
+```{r results-table-west}
+
+# convert results to a table that we like
+results_west %>%
+  # combine results for all models
+  lapply(as.data.frame) %>%
+  bind_rows() %>%
+  mutate(outcome = outcomes) %>%
+  
+  # add gender column, p-value sig stars, and combine values for final RD expression
+  separate(outcome, into = c("outcome", "gender"), fill = "right", sep = "_female") %>%
+  mutate(pstar = ifelse(rd_pval < 0.01, "***",
+                        ifelse(rd_pval < 0.05, "**",
+                               ifelse(rd_pval < 0.1, "*", "")))) %>%
+  mutate(gender = ifelse(is.na(gender), "male", "female"),
+         rd_effect = paste0(round(rd_effect, 3), pstar),
+         rd_error = paste0("(", round(rd_error, 3), ")"),
+         n_effective = paste(format(n_effective, big.mark=","))
+         ) %>%
+  
+  # format estimates
+  mutate(
+    across(
+      all_of(c("y_mean", "y_sd")),
+      ~paste(round(.x, 3))
+    )
+  ) %>%
+  
+  # reshape so columns are each model
+  select(-all_of(c("rd_pval", "pstar"))) %>%
+  pivot_longer(cols = -c("outcome", "gender")) %>%
+  pivot_wider(id_cols = c("gender", "name"), names_from = "outcome") %>%
+  
+  # order rows and label
+  mutate(name = factor(name, levels = c("rd_effect", "rd_error", "n_effective", "y_mean", "y_sd")),
+         gender = factor(gender, levels = c("male", "female"))) %>%
+  arrange(gender, name) %>%
+  mutate(name = rep(c("RDD wife earns more West", "", "Observations (effective)", "Mean of dep. var.", "SD of dep. var."), 2)) %>%
+  select(-gender) %>%
+  
+  # final kable
+  kable(
+    format = "html",
+    col.names = c("", "Satisfaction with life", "Satisfaction with work",
+                  "Satisfaction with health", "Mental health", "Physical health"),
+    align = c("l", rep('c', 5)),
+    escape = FALSE
+  ) %>%
+  kableExtra::add_header_above(
+    header = c(" " = 1, "Dependent variable" = 5)
+  ) %>%
+  kableExtra::group_rows("Panel A: Male", 1, 5) %>%
+  kableExtra::group_rows("Panel B: Female", 6, 10) 
+```
+
+# Discussion and Conclusion
+
+Address "mass points detected in the running variable" warning
